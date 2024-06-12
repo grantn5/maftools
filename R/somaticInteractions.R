@@ -311,3 +311,393 @@ somaticInteractions = function(maf, top = 25, genes = NULL, pvalue = c(0.05, 0.0
   }
   return(sigPairsTblSig)
 }
+
+
+somaticInteractions_new= function(
+  maf, 
+  top = 25, 
+  genes = NULL, 
+  pvalue = c(0.05, 0.01),
+  returnAll = TRUE,
+  parallel = FALSE,
+  cores = 4){
+
+  progressr::handlers(global = TRUE)
+
+  
+  if(is.null(genes)){
+    genes = maftools::getGeneSummary(x = maf)[1:top, Hugo_Symbol]
+  }
+
+  if(length(genes) < 2){
+    stop("Minimum two genes required!")
+  }
+
+  om = maftools:::createOncoMatrix(m = maf, g = genes)
+  all.tsbs = levels(maftools::getSampleSummary(x = maf)[,Tumor_Sample_Barcode])
+
+  mutMat = om$numericMatrix
+  missing.tsbs = all.tsbs[!all.tsbs %in% colnames(mutMat)]
+
+  if(nrow(mutMat) < 2){
+    stop("Minimum two genes required!")
+  }
+  mutMat[mutMat > 0 ] = 1
+
+  if(length(missing.tsbs) > 0){
+    missing.tsbs = as.data.frame(matrix(data = 0, ncol = length(missing.tsbs), nrow = nrow(mutMat)),
+                                 row.names = missing.tsbs)
+    rownames(missing.tsbs) = rownames(mutMat)
+    mutMat = cbind(mutMat, missing.tsbs)
+  }
+
+  if(parallel == FALSE){
+    future::plan("sequential")
+  } else {
+    future::plan("multicore", workers = cores)
+  }
+
+  combinations <- combn(rownames(mutMat), 2, simplify = FALSE)
+  p <- progressr::progressor(steps = length(combinations))
+
+  sigPairsTblSig <- furrr::future_map_dfr(combinations, function(x){
+    p()
+    i = x[1]
+    j = x[2]
+    test = try(fisher.test(x = unlist(unname(mutMat[i, ])), y = unlist(unname(mutMat[j, ]))), silent = TRUE)
+    if (!inherits(test, "try-error")) {
+      tibble::tibble(
+        gene1 = i,
+        gene2 = j,
+        pValue = test$p.value,
+        oddsRatio = test$estimate,
+        `00` = sum(mutMat[i, ] == 0 & mutMat[j, ] == 0),
+        `01` = sum(mutMat[i, ] == 0 & mutMat[j, ] == 1),
+        `10` = sum(mutMat[i, ] == 1 & mutMat[j, ] == 0),
+        `11` = sum(mutMat[i, ] == 1 & mutMat[j, ] == 1),
+        Event = ifelse(test$estimate > 1, "Co_Occurence", "Mutually_Exclusive"),
+        event_ratio = paste0(`11`, '/', `01` + `10`)
+      )
+    } else {
+      if(all(mutMat[i,] == mutMat[j,])){
+            warning("All the samples are in the same direction for the genes ", i, " and ",  j, "! Could not perform Fisher test.")
+      }
+      tibble::tibble(
+        gene1 = i,
+        gene2 = j,
+        pValue = NA,
+        oddsRatio = NA,
+        `00` = NA,
+        `01` = NA,
+        `10` = NA,
+        `11` = NA,
+        Event = NA,
+        event_ratio = NA
+      )
+    }
+  }) |>
+  dplyr::mutate(pAdj = p.adjust(pValue, method = 'fdr'))
+
+    if(!returnAll){
+    sigPairsTblSig = sigPairsTblSig[pValue < min(pvalue)]
+  }
+  return(sigPairsTblSig)
+
+}
+
+somaticInteractions_cnv = function(
+  maf, 
+  top = 25, 
+  genes = NULL, 
+  pvalue = c(0.05, 0.01),
+  returnAll = TRUE,
+  parallel = FALSE,
+  cores = 4){
+
+  # progressr::handlers(global = TRUE)
+
+  
+  if(is.null(genes)){
+    genes = dplyr::arrange(maftools::getGeneSummary(x = maf), desc(AlteredSamples))[1:top, Hugo_Symbol]
+  }
+
+  if(length(genes) < 2){
+    stop("Minimum two genes required!")
+  }
+
+  om = maftools:::createOncoMatrix(m = maf, g = genes)
+  all.tsbs = levels(maftools::getSampleSummary(x = maf)[,Tumor_Sample_Barcode])
+
+  mutMat = om$oncoMatrix
+  missing.tsbs = all.tsbs[!all.tsbs %in% colnames(mutMat)]
+
+  mutMat[mutMat == "" ] = "Dip"
+  ## check mutMat only contains Amp Del or Dip
+  if(!all(mutMat %in% c("Amp", "Del", "Dip"))){
+    stop("Invalid values in the matrix! expecting only 'Amp', 'Del' or 'Dip'! got ", names(table(mutMat))) 
+  }
+  
+
+
+  if(nrow(mutMat) < 2){
+    stop("Minimum two genes required!")
+  }
+  
+
+  if(length(missing.tsbs) > 0){
+    missing.tsbs = as.data.frame(matrix(data = 0, ncol = length(missing.tsbs), nrow = nrow(mutMat)),
+                                 row.names = missing.tsbs)
+    rownames(missing.tsbs) = rownames(mutMat)
+    mutMat = cbind(mutMat, missing.tsbs)
+  }
+
+  if(parallel == FALSE){
+    future::plan("sequential")
+  } else {
+    future::plan("multicore", workers = cores)
+  }
+
+  combinations <- combn(rownames(mutMat), 2, simplify = FALSE)
+  # p <- progressr::progressor(steps = length(combinations))
+
+  sigPairsTblSig <- furrr::future_map_dfr(combinations, function(x){
+    # p()
+    i = x[1]
+    j = x[2]
+    test = try(fisher.test(x = unlist(unname(mutMat[i, ])), y = unlist(unname(mutMat[j, ]))), silent = TRUE)
+    if (!inherits(test, "try-error")) {
+      tibble::tibble(
+        gene1 = i,
+        gene2 = j,
+        pValue = test$p.value,
+        oddsRatio = test$estimate,
+        `Amp-Amp` = sum(mutMat[i, ] == "Amp" & mutMat[j, ] == "Amp"),
+        `Amp-Dip` = sum(mutMat[i, ] == "Amp" & mutMat[j, ] == "Dip"),
+        `Dip-Amp` = sum(mutMat[i, ] == "Dip" & mutMat[j, ] == "Amp"),
+        `Dip-Dip` = sum(mutMat[i, ] == "Dip" & mutMat[j, ] == "Dip"),
+        `Del-Del` = sum(mutMat[i, ] == "Del" & mutMat[j, ] == "Del"),
+        `Del-Dip` = sum(mutMat[i, ] == "Del" & mutMat[j, ] == "Dip"),
+        `Dip-Del` = sum(mutMat[i, ] == "Dip" & mutMat[j, ] == "Del"),
+        `Amp-Del` = sum(mutMat[i, ] == "Amp" & mutMat[j, ] == "Del"),
+        `Del-Amp` = sum(mutMat[i, ] == "Del" & mutMat[j, ] == "Amp"),
+        # Event = ifelse(test$estimate > 1, "Co_Occurence", "Mutually_Exclusive")
+      )
+    } else {
+      tibble::tibble(
+        gene1 = i,
+        gene2 = j,
+        pValue = NA,
+        oddsRatio = NA,
+        `Amp-Amp` = NA,
+        `Amp-Dip` = NA,
+        `Dip-Amp` = NA,
+        `Dip-Dip` = NA,
+        `Del-Del` = NA,
+        `Del-Dip` = NA,
+        `Dip-Del` = NA,
+        `Amp-Del` = NA,
+        `Del-Amp` = NA,
+        # Event = "NA"
+      )
+    }
+  }) |>
+  dplyr::mutate(pAdj = p.adjust(pValue, method = 'fdr'))
+
+    if(!returnAll){
+    sigPairsTblSig = sigPairsTblSig[pValue < min(pvalue)]
+  }
+  return(sigPairsTblSig)
+
+}
+
+
+plot_SomaticInteractions <- function(
+  sigPairsTblSig,
+  geneOrder = NULL, 
+  fontSize = 0.8, 
+  leftMar = 4, 
+  topMar = 4, 
+  showSigSymbols = TRUE,
+  showCounts = FALSE, 
+  countStats = 'all', 
+  countType = 'all',
+  countsFontSize = 0.8,
+  countsFontColor = "black", 
+  colPal = "BrBG", 
+  revPal = FALSE, 
+  showSum = TRUE, 
+  plotPadj = FALSE, 
+  colNC=9, 
+  nShiftSymbols = 5, 
+  sigSymbolsSize=2,
+  sigSymbolsFontSize=0.9, 
+  pvSymbols = c(46,42), 
+  limitColorBreaks = TRUE){
+
+  
+  if(plotPadj){
+    sigPairsTblSig$pAdjLog = ifelse(sigPairsTblSig$oddsRatio > 1, yes = -log10(sigPairsTblSig$pAdj), no = log10(sigPairsTblSig$pAdj))
+    interactionsFDR = tidyr::pivot_wider(data = sigPairsTblSig, names_from = gene2, values_from = pAdjLog)
+    data.table::setDF(interactionsFDR, rownames = interactionsFDR$gene1)
+    interactionsFDR$gene1 = NULL
+    interactions = interactionsFDR[rownames(interactions), colnames(interactions)]
+    interactions = as.matrix(interactions)
+    sigPairsTblSig$pAdjLog = NULL
+  }
+
+  #Source code borrowed from: https://www.nature.com/articles/ncomms6901
+  if(nrow(interactions) >= 5){
+    #interactions[10^-abs(interactions) > max(pvalue)] = 0
+    diag(interactions) <- 0
+    m <- nrow(interactions)
+    n <- ncol(interactions)
+
+
+    col_pal = RColorBrewer::brewer.pal(9, colPal)
+    if(revPal){
+      col_pal = rev(col_pal)
+    }
+    col_pal = grDevices::colorRampPalette(colors = col_pal)
+    col_pal = col_pal(m*n-1)
+
+
+    if(!is.null(geneOrder)){
+      if(!all(rownames(interactions) %in% geneOrder)){
+        stop("Genes in geneOrder does not match the genes used for analysis.")
+      }
+      interactions = interactions[geneOrder, geneOrder]
+    }
+
+    interactions[lower.tri(x = interactions, diag = TRUE)] = NA
+
+    gene_sum = getGeneSummary(x = maf)[Hugo_Symbol %in% rownames(interactions), .(Hugo_Symbol, AlteredSamples)]
+    data.table::setDF(gene_sum, rownames = as.character(gene_sum$Hugo_Symbol))
+    gene_sum = gene_sum[rownames(interactions),]
+    if(!all(rownames(gene_sum) == rownames(interactions))){
+      stop(paste0("Row mismatches!"))
+    }
+    if(!all(rownames(gene_sum) == colnames(interactions))){
+      stop(paste0("Column mismatches!"))
+    }
+    if(showSum){
+      rownames(gene_sum) = paste0(apply(gene_sum, 1, paste, collapse = ' ['), ']')
+    }
+
+    par(bty="n", mar = c(1, leftMar, topMar, 2)+.1, las=2, fig = c(0, 1, 0, 1))
+
+    # adjust breaks for colors according to predefined legend values
+    breaks = NA
+    if(limitColorBreaks){
+      minLog10pval = 3
+      breaks <- seq(-minLog10pval,minLog10pval,length.out=m*n+1)
+      #replace extreme values with the predefined minLog10pval values (and avoid white colored squares)
+      interactions4plot  = interactions
+      interactions4plot[interactions4plot < (-minLog10pval)] = -minLog10pval
+      interactions4plot[interactions4plot > minLog10pval] = minLog10pval
+      interactions = interactions4plot
+    }
+
+    image(x=1:n, y=1:m, interactions, col = col_pal,
+          xaxt="n", yaxt="n",
+          xlab="",ylab="", xlim=c(0, n+1), ylim=c(0, n+1),
+          breaks = seq(-3, 3, length.out = (nrow(interactions) * ncol(interactions))))
+
+    abline(h=0:n+.5, col="white", lwd=.5)
+    abline(v=0:n+.5, col="white", lwd=.5)
+
+    mtext(side = 2, at = 1:m, text = rownames(gene_sum), cex = fontSize, font = 3)
+    mtext(side = 3, at = 1:n, text = rownames(gene_sum), cex = fontSize, font = 3)
+    #text(x = 1:m, y = rep(n+0.5, length(n)), labels = rownames(gene_sum), srt = 90, adj = 0, font = 3, cex = fontSize)
+
+    if(showCounts){
+      countStats = match.arg(arg = countStats, choices = c("all", "sig"))
+      countType = match.arg(arg = countType, choices = c("all", "cooccur", "mutexcl"))
+
+      if(countStats == 'sig'){
+        w = arrayInd(which(10^-abs(interactions) < max(pvalue)), rep(m,2))
+        for(i in 1:nrow(w)){
+          g1 = rownames(interactions)[w[i, 1]]
+          g2 = colnames(interactions)[w[i, 2]]
+          g12 = paste(sort(c(g1, g2)), collapse = ', ')
+          if(countType == 'all'){
+            e = sigPairsTblSig[pValue < max(pvalue)][pair %in% g12, event_ratio]
+          }else if(countType == 'cooccur'){
+            e = sigPairsTblSig[pValue < max(pvalue)][Event %in% "Co_Occurence"][pair %in% g12, `11`]
+          }else if(countType == 'mutexcl'){
+            e = sigPairsTblSig[pValue < max(pvalue)][Event %in% "Mutually_Exclusive"][pair %in% g12, `11`]
+          }
+          if(length(e) == 0){
+            e = 0
+          }
+          text(w[i,1], w[i,2], labels = e, font = 3, col = countsFontColor, cex = countsFontSize)
+        }
+      }else if(countStats == 'all'){
+        w = arrayInd(which(10^-abs(interactions) < max(pvalue)), rep(m,2))
+        w2 = arrayInd(which(10^-abs(interactions) >= max(pvalue)), rep(m,2))
+        w = rbind(w, w2)
+        #print(w)
+        for(i in 1:nrow(w)){
+          g1 = rownames(interactions)[w[i, 1]]
+          g2 = colnames(interactions)[w[i, 2]]
+          g12 = paste(sort(c(g1, g2)), collapse = ', ')
+          if(countType == 'all'){
+            e = sigPairsTblSig[pair %in% g12, event_ratio]
+          }else if(countType == 'cooccur'){
+            e = sigPairsTblSig[pair %in% g12, `11`]
+          }else if(countType == 'mutexcl'){
+            e = sigPairsTblSig[pair %in% g12, `01` + `10`]
+          }
+          if(length(e) == 0){
+            e = 0
+          }
+          text(w[i,1], w[i,2], labels = e, font = 3, col = countsFontColor, cex = countsFontSize)
+        }
+      }
+    }
+
+    if(showSigSymbols){
+      w = arrayInd(which(10^-abs(interactions) < min(pvalue)), rep(m,2))
+      points(w, pch=pvSymbols[2], col="black", cex = sigSymbolsSize)
+      #w = arrayInd(which(10^-abs(interactions) < max(pvalue)), rep(m,2))
+      w = arrayInd(which((10^-abs(interactions) < max(pvalue)) & (10^-abs(interactions) > min(pvalue))), rep(m,2))
+      points(w, pch=pvSymbols[1], col="black", cex = sigSymbolsSize)
+    }
+
+    if(showSigSymbols){
+      points(x = n-nShiftSymbols, y = 0.7*n, pch = pvSymbols[2], cex = sigSymbolsSize) # "*"
+      if(plotPadj){
+        text(x = n-nShiftSymbols, y = 0.7*n, paste0(" fdr < ", min(pvalue)), pos=4, cex = sigSymbolsFontSize, adj = 0)
+      }else{
+        text(x = n-nShiftSymbols, y = 0.7*n, paste0(" P < ", min(pvalue)), pos=4, cex = sigSymbolsFontSize, adj = 0)
+      }
+
+      points(x = n-nShiftSymbols, y = 0.65*n, pch = pvSymbols[1], cex = sigSymbolsSize) # "."
+      if(plotPadj){
+        text(x = n-nShiftSymbols, y = 0.65*n, paste0(" fdr < ", max(pvalue)), pos=4, cex = sigSymbolsFontSize)
+      }else{
+        text(x = n-nShiftSymbols, y = 0.65*n, paste0(" P < ", max(pvalue)), pos=4, cex = sigSymbolsFontSize)
+      }
+    }
+
+    #image(y = 1:8 +6, x=rep(n,2)+c(2,2.5)+1, z=matrix(c(1:8), nrow=1), col=brewer.pal(8,"PiYG"), add=TRUE)
+    par(fig = c(0.4, 0.7, 0, 0.4), new = TRUE)
+    image(
+      x = c(0.8, 1),
+      y = seq(0, 1, length.out = 200),
+      z = matrix(seq(0,1,length.out = 200), nrow = 1),
+      col = col_pal, xlim = c(0, 1), ylim = c(0, 1), axes = FALSE, xlab = NA, ylab = NA
+    )
+
+    #atLims = seq(nrow(interactions), 0.9*nrow(interactions), length.out = 7)
+    atLims = seq(0, 1, length.out = 7)
+    axis(side = 4, at = atLims,  tcl=-.15, labels =c("> 3 (Mutually exclusive)", 2, 1, 0, 1, 2, ">3 (Co-occurence)"), lwd=.5, cex.axis = sigSymbolsFontSize, line = 0.2)
+    if(plotPadj){
+      text(x = 0.4, y = 0.5, labels = "-log10(fdr)", srt = 90, cex = sigSymbolsFontSize, xpd = TRUE)
+    }else{
+      text(x = 0.4, y = 0.5, labels = "-log10(P-value)", srt = 90, cex = sigSymbolsFontSize, xpd = TRUE)
+    }
+
+    #mtext(side=4, at = median(atLims), "-log10 (p-value)", las=3, cex = 0.9, line = 2.5, font = 1)
+  }
+
+}
