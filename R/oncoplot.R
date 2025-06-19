@@ -147,21 +147,12 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
       pathways = data.table::copy(pathways)
       colnames(pathways)[1:2] = c('Gene', 'Pathway')
       data.table::setDT(x = pathways)
-      pathways = pathways[!duplicated(Gene)][,.(Gene, Pathway)]
-      if(!is.null(selectedPathways)){
-        pathways = pathways[Pathway %in% selectedPathways]
-      }
     }else if(file.exists(pathways)){
       pathways = data.table::fread(file = pathways)
       colnames(pathways)[1:2] = c('Gene', 'Pathway')
       data.table::setDT(x = pathways)
-      pathways = pathways[!duplicated(Gene)][,.(Gene, Pathway)]
-      if(!is.null(selectedPathways)){
-        pathways = pathways[Pathway %in% selectedPathways]
-      }
     }else{
       pathways = match.arg(arg = pathways, choices = c("sigpw", "smgbp"))
-      pathwayLoad = get_pw_summary(maf = maf, pathways = pathways)
 
       if(pathways == "sigpw"){
         pathdb <- system.file("extdata", "oncogenic_sig_patwhays.tsv", package = "maftools")
@@ -172,23 +163,45 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
       }
 
       pathways = data.table::fread(file = pathdb, skip = "Gene")
-      pathways = pathways[!duplicated(Gene)][,.(Gene, Pathway)]
-      #pathways$Pathway = gsub(pattern = " ", replacement = "_", x = pathways$Pathway)
-
-
-      if(is.null(selectedPathways)){
-        message("Drawing upto top ", topPathways, " mutated pathways")
-        print(pathwayLoad)
-        if(ncol(pathwayLoad) >= topPathways){
-          pathways = pathways[Pathway %in% pathwayLoad[1:topPathways, Pathway]]
-        }else{
-          pathways = pathways[Pathway %in% pathwayLoad[, Pathway]]
-        }
-      }else{
-        pathways = pathways[Pathway %in% selectedPathways]
-      }
-
     }
+
+    #Convert to characters in case of factors
+    pathways$Gene = as.character(pathways$Gene)
+    pathways$Pathway = as.character(pathways$Pathway)
+
+    if(is.null(selectedPathways)){
+      pathwayLoad = get_pw_summary(maf = maf, pathways = pathways[,.(Pathway, Gene)])
+      message("Drawing upto top ", topPathways, " mutated pathways")
+      if(ncol(pathwayLoad) >= topPathways){
+        pathways = pathways[Pathway %in% pathwayLoad[1:topPathways, Pathway]]
+      }else{
+        pathways = pathways[Pathway %in% pathwayLoad[, Pathway]]
+      }
+    }else{
+      pws_missing = setdiff(selectedPathways, pathways[,.N,Pathway][,Pathway])
+      if(length(pws_missing) > 0){
+        warning("Could not find the following pathways: ", paste(pws_missing, collapse = ", "), immediate. = TRUE)
+      }
+      pathways = pathways[Pathway %in% selectedPathways]
+      if(nrow(pathways) == 0){
+        stop("Zero pathways to plot!")
+      }
+    }
+
+    #Make sure pathway names are distinct from the gene names
+    dup_pw_names = intersect(pathways$Pathway, pathways$Gene)
+    if(length(dup_pw_names) > 0){
+      warning("Found following pathways with the same name as gene symbols. Renamed them with the suffix _pw\n", paste(dup_pw_names, collapse = ", "), immediate. = TRUE)
+      unique_pw_names = setdiff(pathways$Pathway, dup_pw_names)
+      pw_named_list = setNames(nm = c(unique_pw_names, dup_pw_names), object = c(unique_pw_names, paste0(dup_pw_names, "_pw")))
+      pathways$Pathway = unname(obj = pw_named_list[pathways$Pathway])
+    }
+
+    if(nrow(pathways[duplicated(Gene)]) > 0){
+      warning("Duplicated genes found across multiple pathways! This might cause issue while plotting.", immediate. = TRUE)
+      # pathways = pathways[!duplicated(Gene)]
+    }
+
     genes = as.character(pathways$Gene)
 
     om = createOncoMatrix(m = maf, g = genes, cbio = cBioPortal)
@@ -410,10 +423,15 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
     nm = lapply(seq_along(temp_dat), function(i){
       x = numMat[temp_dat[[i]]$Gene,, drop = FALSE]
       x = rbind(x, apply(x, 2, function(y) ifelse(test = sum(y) == 0, yes = 0, no = 99)))
+      if(names(temp_dat)[i] %in% rownames(x)){
+        stop("pathway name ", names(temp_dat)[i], " is same as one of its member genes! Please rename it.\ne.g, ", names(temp_dat)[i], " to ", names(temp_dat)[i], "_pw")
+      }
       rownames(x)[nrow(x)] = names(temp_dat)[i]
       x
     })
+
     numMat = do.call(rbind, nm)
+
     #Add pathway information to the character matrix
     mat_origin_path = rownames(numMat)[!rownames(numMat) %in% rownames(mat_origin)]
 
@@ -422,7 +440,6 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
     mat_origin_path[mat_origin_path == "99"] = "pathway"
     mat_origin_path = mat_origin_path[,colnames(mat_origin), drop = FALSE]
     if(collapsePathway){
-      #print(mat_origin_path)
       mat_origin = mat_origin_path
       numMat = numMat[rownames(mat_origin),, drop = FALSE]
       row_ord = names(sort(apply(numMat, 1, function(x) length(x[x == 0])), decreasing = FALSE))
@@ -433,7 +450,6 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
       if(sortByAnnotation){
         numMat = sortByAnnotation(numMat = numMat, maf = maf, anno = annotation, annoOrder = annotationOrder, group = groupAnnotationBySize, isNumeric = FALSE)
       }
-      #return(numMat)
     }else{
       mat_origin = rbind(mat_origin, mat_origin_path)
     }
@@ -575,6 +591,7 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
   if(drawRowBar){
     if(is.null(rightBarData)){
       side_bar_lims = c(0, max(unlist(apply(numMat, 1, function(x) cumsum(table(x[x!=0])))), na.rm = TRUE))
+      rightBarTitle = "No. of samples"
     }else{
       rightBarTitle = colnames(rightBarData)[2]
       colnames(rightBarData) = c('genes', 'exprn')
@@ -605,7 +622,6 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
 
       plot(x = NA, y = NA, type = "n", axes = FALSE,
            xlim = side_bar_lims, ylim = c(0, 1), xaxs = "i")
-      rightBarTitle = "No. of samples"
     }
   }
 
@@ -745,8 +761,8 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
   }
 
   #Add grids
-  abline(h = (0:ncol(nm)) + 0.5, col = borderCol, lwd = sepwd_genes)
-  abline(v = (0:nrow(nm)) + 0.5, col = borderCol, lwd = sepwd_samples)
+  abline(h = (0:ncol(nm)) + 0.5, col = borderCol, lwd = sepwd_genes, xpd = FALSE)
+  abline(v = (0:nrow(nm)) + 0.5, col = borderCol, lwd = sepwd_samples, xpd = FALSE)
 
   #Add boxes if pathways are opted
   if(!is.null(pathways)){
@@ -962,55 +978,57 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
   #06: Plot annotations if any
   if(!is.null(clinicalFeatures)){
 
-    #clini_lvls = as.character(unlist(lapply(annotation, function(x) unique(as.character(x)))))
-    clini_lvls = lapply(annotation, function(x) unique(as.character(x)))
+    annotation = annotation[colnames(numMat), ncol(annotation):1, drop = FALSE]
 
     if(is.null(annotationColor)){
+      #In case no-color codes are provided
       annotationColor = get_anno_cols(ann = annotation)
-    }
-    annotationColor = annotationColor[colnames(annotation)]
+    }else{
+      #If provided - generate a continuous palette for continuous variables
+      annotationColor = annotationColor[colnames(annotation)]
 
-    annotationColor = lapply(annotationColor, function(x) {
-      na_idx = which(is.na(names(x)))
-      x[na_idx] = "gray70"
-      names(x)[na_idx] = "NA"
-      x
-    })
+      annotationColor_temp = lapply(seq_along(annotationColor), function(idx){
+        if(is.numeric(annotation[,idx])){
+          #print(annotationColor[[idx]])
+          seq_col_pal = c("Blues", "BuGn", "BuPu", "GnBu", "Greens", "Greys", "Oranges",
+                          "OrRd", "PuBu", "PuBuGn", "PuRd", "Purples", "RdPu", "Reds",
+                          "YlGn", "YlGnBu", "YlOrBr", "YlOrRd")
+          col_match = annotationColor[idx] %in% seq_col_pal
 
-    anno_cols = c()
-    for(i in 1:length(annotationColor)){
-      anno_cols = c(anno_cols, annotationColor[[i]])
-    }
+          if(!col_match){
+            stop("numeric annotation color for ", names(annotationColor)[idx] , " must be a sequential color palette!\n", paste(seq_col_pal, collapse = " "))
+          }
 
-    #clini_lvls = clini_lvls[!is.na(clini_lvls)]
-    clini_lvls = lapply(clini_lvls, function(cl){
-      temp_names = suppressWarnings(sample(
-        x = setdiff(x = 1:1000, y = as.numeric(as.character(cl))),
-        size = length(cl),
-        replace = FALSE
-      ))
-      names(cl) = temp_names#1:length(clini_lvls)
-      cl
-    })
+          x = annotation[,idx]
+          x = x[!is.na(x)]
+          x_ord = order(x)
 
-    temp_rownames = rownames(annotation)
-    annotation = data.frame(lapply(annotation, as.character),
-                            stringsAsFactors = FALSE, row.names = temp_rownames)
+          numericAnnoCol = RColorBrewer::brewer.pal(n = 9, name = annotationColor[[idx]])
+          ann_lvls_cols = colorRampPalette(numericAnnoCol)(length(x))
+          names(ann_lvls_cols) = x[x_ord]
+        }else{
+          ann_lvls_cols = annotationColor[[idx]]
+          ann_lvls_cols = ann_lvls_cols[as.character(annotation[,idx])]
+        }
+        ann_lvls_cols
+      })
+      names(annotationColor_temp) = names(annotationColor)
 
-    annotation_color_coded = data.frame(row.names = rownames(annotation), stringsAsFactors = FALSE)
-    for(i in 1:length(clini_lvls)){
-      cl = clini_lvls[[i]]
-      clname = names(clini_lvls)[i]
-      cl_vals = annotation[,clname] #values in column
-      for(i in 1:length(cl)){
-        cl_vals[cl_vals == cl[i]] = names(cl[i])
+      #dirty way to check which columns are of numeric
+      temp_col_class = c()
+      for(i in 1:ncol(annotation)){
+        if(is.numeric(annotation[,i])){
+          temp_col_class = c(temp_col_class, "numeric")
+        }else{
+          temp_col_class = c(temp_col_class, "char")
+        }
       }
-      annotation_color_coded = cbind(annotation_color_coded, cl_vals, stringsAsFactors = FALSE)
+      annotationColor = annotationColor_temp
+      attr(annotationColor, "class") = temp_col_class
     }
-    names(annotation_color_coded) = names(clini_lvls)
 
-    annotation = data.frame(lapply(annotation_color_coded, as.numeric), stringsAsFactors=FALSE, row.names = temp_rownames)
-    annotation = annotation[colnames(numMat), ncol(annotation):1, drop = FALSE]
+    ann_classes = attributes(annotationColor)$class
+    #return(list(annotation, annotationColor))
 
     if(!is.null(leftBarData)){
       plot.new()
@@ -1022,40 +1040,43 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
       par(mar = c(0, gene_mar, 0, 3), xpd = TRUE)
     }
 
-    image(x = 1:nrow(annotation), y = 1:ncol(annotation), z = as.matrix(annotation),
+    image(x = 1:nrow(annotation), y = 1:ncol(annotation), z = matrix(data = 0, nrow = nrow(annotation), ncol = ncol(annotation)),
           axes = FALSE, xaxt="n", yaxt="n", bty = "n",
-          xlab="", ylab="", col = "white") #col = "#FC8D62"
+          xlab="", ylab="", col = "gray90") #col = "#FC8D62"
 
-    #Plot for all variant classifications
-    for(i in 1:length(clini_lvls)){
-      cl = clini_lvls[[i]]
-      clnames = names(clini_lvls)[i]
-      cl_cols = annotationColor[[clnames]]
-      for(i in 1:length(names(cl))){
-        anno_code = cl[i]
-        col = cl_cols[anno_code]
-        temp_anno = as.matrix(annotation)
-        #Handle NA's
-        if(is.na(col)){
-          col = "gray70"
-          temp_anno[is.na(temp_anno)] = as.numeric(names(anno_code))
-        }
-        temp_anno[temp_anno != names(anno_code)] = NA
+    for(i in 1:ncol(annotation)){
+      temp_anno = annotation
 
+      if(ncol(temp_anno) > 1){
+        rm_idx = setdiff(y = i, x = 1:ncol(temp_anno))
+        temp_anno[,rm_idx] = NA
+      }
+
+      if(ann_classes[i] == "numeric"){
+        temp_anno = apply(temp_anno, 2, as.numeric)
         suppressWarnings(image(x = 1:nrow(temp_anno), y = 1:ncol(temp_anno), z = temp_anno,
-                               axes = FALSE, xaxt="n", yaxt="n", xlab="", ylab="", col = col, add = TRUE))
+                               axes = FALSE, xaxt="n", yaxt="n", xlab="", ylab="", col = annotationColor[[i]], add = TRUE))
+      }else{
+        temp_lvls = unique(names(annotationColor[[i]])) #unique(temp_anno[,i])
+        temp_lvls = temp_lvls[complete.cases(temp_lvls)] #Remove NAs
+        temp_lvls_cols = annotationColor[[i]][temp_lvls]
+        temp_anno[,i] = match(x = temp_anno[,i], table = unique(temp_lvls), nomatch = NA)
+        temp_anno = apply(temp_anno, 2, as.numeric)
+        suppressWarnings(image(x = 1:nrow(temp_anno), y = 1:ncol(temp_anno), z = temp_anno,
+                               axes = FALSE, xaxt="n", yaxt="n", xlab="", ylab="", col = temp_lvls_cols, add = TRUE))
       }
     }
 
-    #Add grids
-    rect(xleft = 0.5, ybottom = (0:(ncol(annotation))) + 0.5, xright = nrow(annotation)+0.5, ytop = (0:(ncol(annotation))) + 0.5, border = annoBorderCol, lwd = 0.7)
-    abline(v = (0:(nrow(nm))) + 0.5, col = annoBorderCol, lwd = sepwd_samples)
-    mtext(text = colnames(annotation), side = 4,
-          font = 1, line = 0.4, cex = fontSize, las = 2, at = 1:ncol(annotation))
+      #Add grids
+      rect(xleft = 0.5, ybottom = (0:(ncol(annotation))) + 0.5, xright = nrow(annotation)+0.5, ytop = (0:(ncol(annotation))) + 0.5, border = annoBorderCol, lwd = 0.7)
+      abline(v = (0:(nrow(nm))) + 0.5, col = annoBorderCol, lwd = sepwd_samples, xpd = FALSE)
+      mtext(text = colnames(annotation), side = 4,
+            font = 1, line = 0.4, cex = fontSize, las = 2, at = 1:ncol(annotation))
 
-    if(drawRowBar){
-      plot.new()
-    }
+      if(drawRowBar){
+        plot.new()
+      }
+
   }
 
   #07: Draw TiTv plot
@@ -1161,32 +1182,29 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
 
   x_axp = 0+lep$rect$w
 
-  #print(annotation)
-  #return(annotationColor)
-
   if(!is.null(clinicalFeatures)){
     #Check which of the clinicalFeatures are of numeric
-    ann_classes = lapply(names(annotationColor), function(ac){
-      temp_anno = data.table::copy(maf@clinical.data)
-      data.table::setDF(temp_anno)
-      ac_idx = which(colnames(temp_anno) == ac)
-      is.numeric(temp_anno[,ac_idx])
-    })
+    ann_classes = attributes(annotationColor)$class
     num_start = 0.1 #numeric legend starts from here
     num_width = 0.1
     num_incr = 0.2
 
-    for(i in 1:ncol(annotation)){
+    for(i in seq_along(ann_classes)){
       #x = unique(annotation[,i])
+      temp_lvls = unique(names(annotationColor[[i]]))
+      temp_lvls = temp_lvls[complete.cases(temp_lvls)]
+      temp_lvls_cols = annotationColor[[i]][temp_lvls]
       x = annotationColor[[i]]
-      is_num = ann_classes[[i]]
+      is_num = ann_classes[i] == "numeric"
       xt = names(x)
 
       if(is_num){
-        x_range = as.numeric(names(x))
-        x_range = x_range[!is.na(x_range)]
-        x_range = x_range[!is.infinite(x_range)]
-        x_range = range(x_range)
+        xt = as.numeric(xt)
+        xt = xt[!is.na(xt)]
+        xt = xt[!is.infinite(xt)]
+        xt = sort(xt)
+        x = x[as.character(xt)]
+        x_range = round(range(xt), 2)
 
         image(
           y = c(0.1, 0.2),
@@ -1195,31 +1213,21 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
           col = x, xlim = c(0, 1), ylim = c(0, 1), axes = FALSE, xlab = NA, ylab = NA, add = TRUE
         )
         text(x = c(num_start, num_start+num_width), y = 0.2, labels = x_range, pos = 3)
-        text(x = num_start+(num_width/2), y = 0.1, labels = clinicalFeatures[i], pos = 1, adj = 1)
+        text(x = num_start+(num_width/2), y = 0.1, labels = names(annotationColor)[i], pos = 1, adj = 1)
         num_start = num_start + num_incr
 
       }else{
-        if("NA" %in% xt){
-          xt = xt[!xt %in% "NA"]
-          xt = sort(xt, decreasing = FALSE)
-          xt = c(xt, "NA")
-          x = x[xt]
-        }else{
-          xt = sort(xt, decreasing = FALSE)
-          x = x[xt]
-        }
 
-        if(length(x) <= 4){
+        if(length(temp_lvls_cols) <= 4){
           n_col = 1
         }else{
-          n_col = (length(x) %/% 4)+1
+          n_col = (length(temp_lvls_cols) %/% 4)+1
         }
-        names(x)[is.na(names(x))] = "NA"
 
-        lep = legend(x = x_axp, y = 1, legend = names(x),
-                     col = x, border = NA,
+        lep = legend(x = x_axp, y = 1, legend = names(temp_lvls_cols),
+                     col = temp_lvls_cols, border = NA,
                      ncol= n_col, pch = 15, xpd = TRUE, xjust = 0, bty = "n",
-                     cex = annotationFontSize, title = rev(names(annotation))[i],
+                     cex = annotationFontSize, title = names(annotationColor)[i],
                      title.adj = 0)
         x_axp = x_axp + lep$rect$w
 
@@ -1229,12 +1237,6 @@ oncoplot = oncoplot = function(maf, top = 20, minMut = NULL, genes = NULL, alter
 
   n_mut_samps = length(which(colSums(numMat) != 0))
   altStat = paste0("Altered in ", n_mut_samps, " (", round(n_mut_samps/totSamps, digits = 4)*100, "%) of ", totSamps, " samples.")
-  # if(removeNonMutated){
-  #   #mutSamples = length(unique(unlist(genesToBarcodes(maf = maf, genes = rownames(mat), justNames = TRUE))))
-  # }else{
-  #   mutSamples = length(unique(unlist(genesToBarcodes(maf = maf, genes = rownames(numMat), justNames = TRUE, verbose = FALSE))))
-  #   altStat = paste0("Altered in ", mutSamples, " (", round(mutSamples/totSamps, digits = 4)*100, "%) of ", totSamps, " samples.")
-  # }
 
   if(showTitle){
     if(is.null(titleText)){

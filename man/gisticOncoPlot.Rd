@@ -11,6 +11,7 @@ gisticOncoPlot(
   showTumorSampleBarcodes = FALSE,
   gene_mar = 5,
   barcode_mar = 6,
+  right_mar = 2.5,
   sepwd_genes = 0.5,
   sepwd_samples = 0.25,
   clinicalData = NULL,
@@ -41,6 +42,8 @@ gisticOncoPlot(
 \item{gene_mar}{Default 5}
 
 \item{barcode_mar}{Default 6}
+
+\item{right_mar}{Default 2.5}
 
 \item{sepwd_genes}{Default 0.5}
 
